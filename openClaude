@@ -20,7 +20,11 @@ CLAUDE_DIR="$HOME/.claude"
 
 # ── Ensure LiteLLM config reflects configured region ─────────────────
 if [[ -f "$LITELLM_CONFIG" ]]; then
-  sed -i '' "s/aws_region_name: .*/aws_region_name: $OPENCLAUDE_AWS_REGION/" "$LITELLM_CONFIG"
+  if [[ "$OSTYPE" == "darwin"* ]]; then
+    sed -i '' "s/aws_region_name: .*/aws_region_name: $OPENCLAUDE_AWS_REGION/" "$LITELLM_CONFIG"
+  else
+    sed -i "s/aws_region_name: .*/aws_region_name: $OPENCLAUDE_AWS_REGION/" "$LITELLM_CONFIG"
+  fi
 fi
 
 # ── Kill stale LiteLLM processes that aren't on our port ─────────────
@@ -94,12 +98,13 @@ done
 # Uses firstParty model names so Claude Code recognizes [1m] for 1M context window.
 # Bedrock IDs like us.anthropic.claude-opus-4-6-v1[1m] don't match Claude Code's
 # [1m] parsing in non-Bedrock mode (it checks for "claude-opus-4-6[1m]" etc.)
-jq --arg profile "$OPENCLAUDE_AWS_PROFILE" '
+jq '
   .model = "claude-opus-4-6[1m]" |
   del(.awsCredentialExport) |
-  .awsAuthRefresh = ("aws sso login --profile " + $profile) |
+  del(.awsAuthRefresh) |
   .env = (.env |
     del(.CLAUDE_CODE_USE_BEDROCK) |
+    del(.ANTHROPIC_API_KEY) |
     .ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-4-6[1m]" |
     .ANTHROPIC_DEFAULT_SONNET_MODEL = "claude-sonnet-4-5[1m]" |
     .ANTHROPIC_SMALL_FAST_MODEL = "qwen-3-coder" |
@@ -116,9 +121,6 @@ fi
 # ── Launch Claude Code through LiteLLM ──────────────────────────────
 export CLAUDE_CONFIG_DIR="$OPEN_CLAUDE_DIR"
 export ANTHROPIC_BASE_URL="http://localhost:$LITELLM_PORT"
-# Dummy key — LiteLLM doesn't need a real Anthropic key since it routes to Bedrock,
-# but Claude Code requires ANTHROPIC_API_KEY to be set when not in Bedrock mode.
-export ANTHROPIC_API_KEY="sk-1234"
 
 # Clear vars that conflict with the LiteLLM flow
 unset CLAUDE_CODE_USE_BEDROCK 2>/dev/null || true
