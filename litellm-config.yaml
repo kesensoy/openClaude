@@ -1,0 +1,33 @@
+# LiteLLM routing config for openClaude
+#
+# Claude Code sends firstParty model names (e.g. "claude-opus-4-6").
+# LiteLLM matches model_name and routes to the Bedrock model in litellm_params.
+#
+# To swap the Tier 3 model, change the last entry's litellm_params.model
+# to any Bedrock Converse-compatible model, then restart LiteLLM:
+#   pkill -f litellm
+#   # Next openClaude launch auto-starts it with new config
+
+model_list:
+  # Tier 1: Main session (opus)
+  - model_name: claude-opus-4-6
+    litellm_params:
+      model: bedrock/us.anthropic.claude-opus-4-6-v1
+      aws_region_name: us-west-2
+
+  # Tier 2: Subagents (sonnet)
+  - model_name: claude-sonnet-4-5
+    litellm_params:
+      model: bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0
+      aws_region_name: us-west-2
+
+  # Tier 3: Fast subagents (haiku slot -> Qwen)
+  # Change this to route the haiku slot to a different model.
+  # Use bedrock/converse/ prefix for non-Claude models.
+  - model_name: qwen-3-coder
+    litellm_params:
+      model: bedrock/converse/qwen.qwen3-next-80b-a3b
+      aws_region_name: us-west-2
+
+litellm_settings:
+  drop_params: true

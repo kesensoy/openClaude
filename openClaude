@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# openClaude — Launch Claude Code with LiteLLM mixed-model routing
+#
+# Normal 'claude' → Bedrock-direct (unchanged ~/.claude/settings.json)
+# 'openClaude' → LiteLLM proxy → Bedrock (Claude) + Bedrock Converse (Qwen for haiku slot)
+#
+# Uses CLAUDE_CONFIG_DIR to point at ~/.openClaude/ which has a derived
+# settings.json (no CLAUDE_CODE_USE_BEDROCK, LiteLLM model aliases) while
+# symlinking everything else back to ~/.claude/ so history/projects/etc are shared.
+
+set -euo pipefail
+
+# ── Configuration (override via env vars) ────────────────────────────
+OPENCLAUDE_AWS_PROFILE="${OPENCLAUDE_AWS_PROFILE:-openclaude}"
+OPENCLAUDE_AWS_REGION="${OPENCLAUDE_AWS_REGION:-us-west-2}"
+LITELLM_PORT="${OPENCLAUDE_LITELLM_PORT:-4000}"
+LITELLM_CONFIG="$HOME/.litellm/config.yaml"
+OPEN_CLAUDE_DIR="$HOME/.openClaude"
+CLAUDE_DIR="$HOME/.claude"
+
+# ── Ensure LiteLLM config reflects configured region ─────────────────
+if [[ -f "$LITELLM_CONFIG" ]]; then
+  sed -i '' "s/aws_region_name: .*/aws_region_name: $OPENCLAUDE_AWS_REGION/" "$LITELLM_CONFIG"
+fi
+
+# ── Kill stale LiteLLM processes that aren't on our port ─────────────
+if ! curl -s --max-time 2 "http://localhost:$LITELLM_PORT/health" >/dev/null 2>&1; then
+  pkill -f "litellm.*--port" 2>/dev/null || true
+  sleep 0.5
+fi
+
+# ── Start LiteLLM if not already running ─────────────────────────────
+if ! curl -s --max-time 2 "http://localhost:$LITELLM_PORT/health" >/dev/null 2>&1; then
+  echo "Starting LiteLLM proxy on port $LITELLM_PORT..."
+  if ! command -v litellm >/dev/null 2>&1; then
+    echo "Error: litellm not found. Install with: uv tool install 'litellm[proxy]'" >&2
+    exit 1
+  fi
+  if [[ ! -f "$LITELLM_CONFIG" ]]; then
+    echo "Error: LiteLLM config not found at $LITELLM_CONFIG" >&2
+    exit 1
+  fi
+  AWS_PROFILE="$OPENCLAUDE_AWS_PROFILE" nohup litellm --config "$LITELLM_CONFIG" --port "$LITELLM_PORT" >/tmp/litellm.log 2>&1 &
+  LITELLM_PID=$!
+  echo "LiteLLM started (PID $LITELLM_PID), waiting for health..."
+  for i in {1..15}; do
+    if curl -s --max-time 2 "http://localhost:$LITELLM_PORT/health" >/dev/null 2>&1; then
+      echo "LiteLLM ready."
+      break
+    fi
+    if ! kill -0 "$LITELLM_PID" 2>/dev/null; then
+      echo "Error: LiteLLM failed to start. Check /tmp/litellm.log" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+fi
+
+# ── Build ~/.openClaude/ config dir ──────────────────────────────────
+mkdir -p "$OPEN_CLAUDE_DIR"
+
+# Symlink everything from ~/.claude/ except settings.json files
+for item in "$CLAUDE_DIR"/*; do
+  base=$(basename "$item")
+  case "$base" in
+    settings.json*) continue ;;
+  esac
+  target="$OPEN_CLAUDE_DIR/$base"
+  if [ -L "$target" ] && [ ! -e "$target" ]; then
+    rm "$target"
+  fi
+  if [ ! -e "$target" ] && [ ! -L "$target" ]; then
+    ln -s "$item" "$target"
+  fi
+done
+
+# Also handle hidden files/dirs in ~/.claude/
+for item in "$CLAUDE_DIR"/.*; do
+  base=$(basename "$item")
+  case "$base" in
+    .|..) continue ;;
+    settings.json*) continue ;;
+  esac
+  target="$OPEN_CLAUDE_DIR/$base"
+  if [ -L "$target" ] && [ ! -e "$target" ]; then
+    rm "$target"
+  fi
+  if [ ! -e "$target" ] && [ ! -L "$target" ]; then
+    ln -s "$item" "$target"
+  fi
+done
+
+# Generate derived settings.json from the user's existing ~/.claude/settings.json.
+# Uses firstParty model names so Claude Code recognizes [1m] for 1M context window.
+# Bedrock IDs like us.anthropic.claude-opus-4-6-v1[1m] don't match Claude Code's
+# [1m] parsing in non-Bedrock mode (it checks for "claude-opus-4-6[1m]" etc.)
+jq --arg profile "$OPENCLAUDE_AWS_PROFILE" '
+  .model = "claude-opus-4-6[1m]" |
+  del(.awsCredentialExport) |
+  .awsAuthRefresh = ("aws sso login --profile " + $profile) |
+  .env = (.env |
+    del(.CLAUDE_CODE_USE_BEDROCK) |
+    .ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-4-6[1m]" |
+    .ANTHROPIC_DEFAULT_SONNET_MODEL = "claude-sonnet-4-5[1m]" |
+    .ANTHROPIC_SMALL_FAST_MODEL = "qwen-3-coder" |
+    .ANTHROPIC_DEFAULT_HAIKU_MODEL = "qwen-3-coder"
+  )
+' "$CLAUDE_DIR/settings.json" > "$OPEN_CLAUDE_DIR/settings.json"
+
+# Seed .claude.json (auth state, theme, etc.) from home dir if openClaude's copy
+# doesn't exist yet. After first copy, each mode maintains its own state independently.
+if [ ! -f "$OPEN_CLAUDE_DIR/.claude.json" ]; then
+  cp "$HOME/.claude.json" "$OPEN_CLAUDE_DIR/.claude.json" 2>/dev/null || true
+fi
+
+# ── Launch Claude Code through LiteLLM ──────────────────────────────
+export CLAUDE_CONFIG_DIR="$OPEN_CLAUDE_DIR"
+export ANTHROPIC_BASE_URL="http://localhost:$LITELLM_PORT"
+# Dummy key — LiteLLM doesn't need a real Anthropic key since it routes to Bedrock,
+# but Claude Code requires ANTHROPIC_API_KEY to be set when not in Bedrock mode.
+export ANTHROPIC_API_KEY="sk-1234"
+
+# Clear vars that conflict with the LiteLLM flow
+unset CLAUDE_CODE_USE_BEDROCK 2>/dev/null || true
+unset CLAUDE_CODE_SUBAGENT_MODEL 2>/dev/null || true
+
+exec "$HOME/.local/bin/claude" "$@"
