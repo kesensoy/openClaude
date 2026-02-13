@@ -19,12 +19,47 @@ If you prefer not to use the install script:
 4. Set up an AWS profile with Bedrock access (see install script for the format)
 5. Run `aws sso login --profile openclaude`, then `openclaude`
 
+## OAuth Authentication (Anthropic Plan)
+
+**IMPORTANT:** openClaude now supports mixed authentication:
+- **Opus/Sonnet:** Uses your Claude plan subscription (OAuth via web browser)
+- **Haiku:** Uses AWS Bedrock (requires AWS credentials)
+
+This configuration requires a **patched version of LiteLLM** until [PR #19912](https://github.com/BerriAI/litellm/pull/19912) is merged.
+
+### Installation with OAuth Support
+
+```bash
+# Install patched LiteLLM (temporary - until PR merges)
+uv tool uninstall litellm
+uv tool install git+https://github.com/iamadamreed/litellm.git@fix/anthropic-oauth-token-forwarding
+
+# Copy configs
+cp openClaude ~/.local/bin/openClaude && chmod +x ~/.local/bin/openClaude
+cp litellm-config.yaml ~/.litellm/config.yaml
+
+# Run (will authenticate via browser for Claude plan)
+openclaude
+```
+
+### When PR #19912 Merges
+
+Once the OAuth fix is merged into official LiteLLM:
+
+```bash
+# Switch back to official release
+uv tool uninstall litellm
+uv tool install 'litellm[proxy]'
+```
+
+Update this README to remove the caveat about using the PR branch.
+
 ## Model Tiers
 
 | Tier | Claude Code slot | Routed to | Used by |
 |------|-----------------|-----------|---------|
-| 1 | opus | Claude Opus 4.6 (Bedrock) | Main session |
-| 2 | sonnet | Claude Sonnet 4.5 (Bedrock) | `Task` tool with `model: "sonnet"` |
+| 1 | opus | Claude Opus 4.6 (Anthropic OAuth) | Main session |
+| 2 | sonnet | Claude Sonnet 4.5 (Anthropic OAuth) | `Task` tool with `model: "sonnet"` |
 | 3 | haiku | Qwen 3 Next 80B (Bedrock Converse) | `Task` tool with `model: "haiku"` |
 
 ## Swapping the Haiku Model
