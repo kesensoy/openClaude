@@ -1,33 +1,32 @@
-# LiteLLM routing config for openClaude
+# LiteLLM routing config for openClaude - OAuth/Bedrock mixed mode
 #
 # Claude Code sends firstParty model names (e.g. "claude-opus-4-6").
-# LiteLLM matches model_name and routes to the Bedrock model in litellm_params.
+# LiteLLM matches model_name and routes to the appropriate provider.
 #
-# To swap the Tier 3 model, change the last entry's litellm_params.model
-# to any Bedrock Converse-compatible model, then restart LiteLLM:
-#   pkill -f litellm
-#   # Next openClaude launch auto-starts it with new config
+# OAuth tokens (sk-ant-oat01-*) are forwarded from Authorization headers
+# to Anthropic API for opus/sonnet. AWS credentials from shell are used
+# for Bedrock Converse requests for haiku.
 
 model_list:
-  # Tier 1: Main session (opus)
+  # Tier 1: Main session (opus) - Anthropic API with OAuth
   - model_name: claude-opus-4-6
     litellm_params:
-      model: bedrock/us.anthropic.claude-opus-4-6-v1
-      aws_region_name: us-west-2
+      model: anthropic/claude-opus-4-6-20250514
+      # No api_key needed - OAuth token forwarded from Authorization header
 
-  # Tier 2: Subagents (sonnet)
+  # Tier 2: Subagents (sonnet) - Anthropic API with OAuth
   - model_name: claude-sonnet-4-5
     litellm_params:
-      model: bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0
-      aws_region_name: us-west-2
+      model: anthropic/claude-sonnet-4-5-20250929
+      # No api_key needed - OAuth token forwarded from Authorization header
 
-  # Tier 3: Fast subagents (haiku slot -> Qwen)
-  # Change this to route the haiku slot to a different model.
-  # Use bedrock/converse/ prefix for non-Claude models.
+  # Tier 3: Fast subagents (haiku) - Bedrock with AWS creds
   - model_name: qwen-3-coder
     litellm_params:
       model: bedrock/converse/qwen.qwen3-next-80b-a3b
       aws_region_name: us-west-2
+      # Uses AWS credentials from shell environment
 
 litellm_settings:
   drop_params: true
+  forward_client_headers_to_llm_api: true  # Enable OAuth header forwarding
