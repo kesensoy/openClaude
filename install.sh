@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # install.sh — Set up openClaude on this machine
 #
-# Idempotent: safe to re-run. Overwrites openClaude script and LiteLLM config
-# each time (they're source-controlled here). Prompts before touching ~/.aws/config.
+# Idempotent: safe to re-run. Overwrites openClaude script and LiteLLM configs
+# each time (they're source-controlled here). Prompts before touching AWS config.
 
 set -euo pipefail
 
@@ -28,8 +28,12 @@ if [ ${#missing[@]} -gt 0 ]; then
     echo "  - $m"
   done
   echo ""
-  echo "Install litellm with: uv tool install 'litellm[proxy]'"
-  echo "Install jq with: brew install jq"
+  echo "Install litellm with:"
+  echo "  uv tool install git+https://github.com/iamadamreed/litellm.git@fix/anthropic-oauth-token-forwarding"
+  echo ""
+  echo "  (See README.md for details on the patched LiteLLM requirement)"
+  echo ""
+  echo "Install jq with: brew install jq (macOS) or apt install jq (Linux)"
   exit 1
 fi
 
@@ -49,11 +53,17 @@ cp "$SCRIPT_DIR/openClaude" "$HOME/.local/bin/openClaude"
 chmod +x "$HOME/.local/bin/openClaude"
 echo "Installed openClaude -> ~/.local/bin/openClaude"
 
-# ── Install LiteLLM config ──────────────────────────────────────────
+# ── Install LiteLLM configs ─────────────────────────────────────────
 mkdir -p "$HOME/.litellm"
-sed "s/aws_region_name: us-west-2/aws_region_name: $aws_region/g" \
-  "$SCRIPT_DIR/litellm-config.yaml" > "$HOME/.litellm/config.yaml"
+
+# Instance 1 config (main proxy — Anthropic OAuth + routing to Instance 2)
+cp "$SCRIPT_DIR/litellm-config.yaml" "$HOME/.litellm/config.yaml"
 echo "Installed LiteLLM config -> ~/.litellm/config.yaml"
+
+# Instance 2 config (Bedrock-only proxy)
+sed "s/aws_region_name: us-west-2/aws_region_name: $aws_region/g; s/aws_profile_name: openclaude/aws_profile_name: $aws_profile/g" \
+  "$SCRIPT_DIR/litellm-config-bedrock.yaml" > "$HOME/.litellm/config-bedrock.yaml"
+echo "Installed LiteLLM Bedrock config -> ~/.litellm/config-bedrock.yaml"
 
 # ── AWS profile setup ───────────────────────────────────────────────
 if grep -q "\[profile $aws_profile\]" "$HOME/.aws/config" 2>/dev/null; then
@@ -61,15 +71,25 @@ if grep -q "\[profile $aws_profile\]" "$HOME/.aws/config" 2>/dev/null; then
 else
   echo ""
   echo "No AWS profile '$aws_profile' found in ~/.aws/config."
-  echo "openClaude needs an AWS profile with Bedrock access to route model requests."
+  echo "openClaude needs an AWS profile with Bedrock access for the haiku model slot."
   echo ""
-  read -rp "Add profile '$aws_profile' to ~/.aws/config? [y/N]: " add_profile
-  if [[ "$add_profile" =~ ^[Yy] ]]; then
-    read -rp "SSO session name: " sso_session
-    read -rp "SSO account ID: " sso_account_id
-    read -rp "SSO role name: " sso_role_name
+  read -rp "Set up profile '$aws_profile' now? [y/N]: " setup_profile
+  if [[ "$setup_profile" =~ ^[Yy] ]]; then
+    echo ""
+    echo "Choose auth method:"
+    echo "  1) IAM access keys (recommended for personal machines)"
+    echo "  2) SSO (for corporate/federated environments)"
+    echo ""
+    read -rp "Auth method [1]: " auth_method
+    auth_method="${auth_method:-1}"
 
-    cat >> "$HOME/.aws/config" <<EOF
+    if [[ "$auth_method" == "2" ]]; then
+      read -rp "SSO session name: " sso_session
+      read -rp "SSO account ID: " sso_account_id
+      read -rp "SSO role name: " sso_role_name
+
+      mkdir -p "$HOME/.aws"
+      cat >> "$HOME/.aws/config" <<EOF
 
 [profile $aws_profile]
 sso_session = $sso_session
@@ -78,9 +98,40 @@ sso_role_name = $sso_role_name
 region = $aws_region
 output = json
 EOF
-    echo "Added profile '$aws_profile' to ~/.aws/config"
+      echo "Added SSO profile '$aws_profile' to ~/.aws/config"
+      echo "Run 'aws sso login --profile $aws_profile' before using openclaude."
+    else
+      echo ""
+      echo "Enter IAM credentials for Bedrock access."
+      echo "(Create a dedicated IAM user with bedrock:InvokeModel and"
+      echo " bedrock:InvokeModelWithResponseStream permissions.)"
+      echo ""
+      read -rp "AWS Access Key ID: " aws_key_id
+      read -rsp "AWS Secret Access Key: " aws_secret_key
+      echo ""
+
+      mkdir -p "$HOME/.aws"
+
+      # Add profile to config
+      cat >> "$HOME/.aws/config" <<EOF
+
+[profile $aws_profile]
+region = $aws_region
+output = json
+EOF
+
+      # Add credentials
+      cat >> "$HOME/.aws/credentials" <<EOF
+
+[$aws_profile]
+aws_access_key_id = $aws_key_id
+aws_secret_access_key = $aws_secret_key
+EOF
+      echo "Added IAM profile '$aws_profile' to ~/.aws/config and ~/.aws/credentials"
+    fi
   else
     echo "Skipped. You'll need to configure the '$aws_profile' AWS profile manually."
+    echo "See README.md for IAM setup instructions."
   fi
 fi
 
@@ -95,7 +146,6 @@ fi
 # ── Done ─────────────────────────────────────────────────────────────
 echo ""
 echo "Done! To get started:"
-echo "  1. Log in to AWS SSO:  aws sso login --profile $aws_profile"
-echo "  2. Run:                openclaude"
+echo "  Run:  openclaude"
 echo ""
 echo "To override the AWS profile:  OPENCLAUDE_AWS_PROFILE=myprofile openclaude"
