@@ -14,46 +14,91 @@ set -euo pipefail
 OPENCLAUDE_AWS_PROFILE="${OPENCLAUDE_AWS_PROFILE:-openclaude}"
 OPENCLAUDE_AWS_REGION="${OPENCLAUDE_AWS_REGION:-us-west-2}"
 LITELLM_PORT="${OPENCLAUDE_LITELLM_PORT:-4000}"
+LITELLM_BEDROCK_PORT=$((LITELLM_PORT + 1))
 LITELLM_CONFIG="$HOME/.litellm/config.yaml"
+LITELLM_BEDROCK_CONFIG="$HOME/.litellm/config-bedrock.yaml"
 OPEN_CLAUDE_DIR="$HOME/.openClaude"
 CLAUDE_DIR="$HOME/.claude"
 
-# ── Ensure LiteLLM config reflects configured region ─────────────────
-if [[ -f "$LITELLM_CONFIG" ]]; then
-  if [[ "$OSTYPE" == "darwin"* ]]; then
-    sed -i '' "s/aws_region_name: .*/aws_region_name: $OPENCLAUDE_AWS_REGION/" "$LITELLM_CONFIG"
-  else
-    sed -i "s/aws_region_name: .*/aws_region_name: $OPENCLAUDE_AWS_REGION/" "$LITELLM_CONFIG"
+# ── Ensure LiteLLM configs reflect configured region ────────────────
+for config in "$LITELLM_CONFIG" "$LITELLM_BEDROCK_CONFIG"; do
+  if [[ -f "$config" ]]; then
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+      sed -i '' "s/aws_region_name: .*/aws_region_name: $OPENCLAUDE_AWS_REGION/" "$config"
+    else
+      sed -i "s/aws_region_name: .*/aws_region_name: $OPENCLAUDE_AWS_REGION/" "$config"
+    fi
   fi
+done
+
+# ── Kill stale LiteLLM processes that aren't on our ports ────────────
+main_healthy=false
+bedrock_healthy=false
+
+if curl -s --max-time 2 "http://localhost:$LITELLM_PORT/health" >/dev/null 2>&1; then
+  main_healthy=true
 fi
 
-# ── Kill stale LiteLLM processes that aren't on our port ─────────────
-if ! curl -s --max-time 2 "http://localhost:$LITELLM_PORT/health" >/dev/null 2>&1; then
+if curl -s --max-time 2 "http://localhost:$LITELLM_BEDROCK_PORT/health" >/dev/null 2>&1; then
+  bedrock_healthy=true
+fi
+
+if ! $main_healthy || ! $bedrock_healthy; then
   pkill -f "litellm.*--port" 2>/dev/null || true
   sleep 0.5
+  main_healthy=false
+  bedrock_healthy=false
 fi
 
-# ── Start LiteLLM if not already running ─────────────────────────────
-if ! curl -s --max-time 2 "http://localhost:$LITELLM_PORT/health" >/dev/null 2>&1; then
-  echo "Starting LiteLLM proxy on port $LITELLM_PORT..."
-  if ! command -v litellm >/dev/null 2>&1; then
-    echo "Error: litellm not found. Install with: uv tool install 'litellm[proxy]'" >&2
+# ── Start LiteLLM instances if not already running ───────────────────
+if ! command -v litellm >/dev/null 2>&1; then
+  echo "Error: litellm not found. Install with: uv tool install 'litellm[proxy]'" >&2
+  exit 1
+fi
+
+# Start Instance 2 (Bedrock-only) if not running
+if ! $bedrock_healthy; then
+  echo "Starting LiteLLM Bedrock instance on port $LITELLM_BEDROCK_PORT..."
+  if [[ ! -f "$LITELLM_BEDROCK_CONFIG" ]]; then
+    echo "Error: LiteLLM Bedrock config not found at $LITELLM_BEDROCK_CONFIG" >&2
     exit 1
   fi
+  AWS_PROFILE="$OPENCLAUDE_AWS_PROFILE" nohup litellm --config "$LITELLM_BEDROCK_CONFIG" --port "$LITELLM_BEDROCK_PORT" >/tmp/litellm-bedrock.log 2>&1 &
+  LITELLM_BEDROCK_PID=$!
+  echo "LiteLLM Bedrock instance started (PID $LITELLM_BEDROCK_PID), waiting for health..."
+  for i in {1..15}; do
+    if curl -s --max-time 2 "http://localhost:$LITELLM_BEDROCK_PORT/health" >/dev/null 2>&1; then
+      echo "LiteLLM Bedrock instance ready."
+      bedrock_healthy=true
+      break
+    fi
+    if ! kill -0 "$LITELLM_BEDROCK_PID" 2>/dev/null; then
+      echo "Error: LiteLLM Bedrock instance failed to start. Check /tmp/litellm-bedrock.log" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+fi
+
+# Start Instance 1 (Main proxy) if not running
+if ! $main_healthy; then
+  echo "Starting LiteLLM main proxy on port $LITELLM_PORT..."
   if [[ ! -f "$LITELLM_CONFIG" ]]; then
     echo "Error: LiteLLM config not found at $LITELLM_CONFIG" >&2
     exit 1
   fi
-  AWS_PROFILE="$OPENCLAUDE_AWS_PROFILE" nohup litellm --config "$LITELLM_CONFIG" --port "$LITELLM_PORT" >/tmp/litellm.log 2>&1 &
+  # Instance 1 needs no AWS credentials - it only talks to Anthropic API or localhost:4001
+  nohup litellm --config "$LITELLM_CONFIG" --port "$LITELLM_PORT" >/tmp/litellm.log 2>&1 &
   LITELLM_PID=$!
-  echo "LiteLLM started (PID $LITELLM_PID), waiting for health..."
+  echo "LiteLLM main proxy started (PID $LITELLM_PID), waiting for health..."
   for i in {1..15}; do
     if curl -s --max-time 2 "http://localhost:$LITELLM_PORT/health" >/dev/null 2>&1; then
-      echo "LiteLLM ready."
+      echo "LiteLLM main proxy ready."
+      main_healthy=true
       break
     fi
     if ! kill -0 "$LITELLM_PID" 2>/dev/null; then
-      echo "Error: LiteLLM failed to start. Check /tmp/litellm.log" >&2
+      echo "Error: LiteLLM main proxy failed to start. Check /tmp/litellm.log" >&2
       exit 1
     fi
     sleep 1

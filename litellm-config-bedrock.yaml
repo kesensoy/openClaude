@@ -1,0 +1,15 @@
+# LiteLLM Bedrock-only config for Instance 2
+#
+# This instance handles ONLY Bedrock requests (qwen) with explicit AWS credentials.
+# No OAuth/Anthropic API access, preventing header forwarding issues.
+
+model_list:
+  # Tier 3: Fast subagents (haiku slot) - Bedrock Converse with explicit creds
+  - model_name: qwen-3-coder
+    litellm_params:
+      model: bedrock/converse/qwen.qwen3-next-80b-a3b
+      aws_region_name: us-west-2
+      aws_profile_name: openclaude
+
+litellm_settings:
+  drop_params: true

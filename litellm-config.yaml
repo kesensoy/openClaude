@@ -1,11 +1,11 @@
-# LiteLLM routing config for openClaude - OAuth/Bedrock mixed mode
+# LiteLLM main routing config for openClaude - Instance 1
 #
 # Claude Code sends firstParty model names (e.g. "claude-opus-4-6").
 # LiteLLM matches model_name and routes to the appropriate provider.
 #
 # OAuth tokens (sk-ant-oat01-*) are forwarded from Authorization headers
-# to Anthropic API for opus/sonnet. AWS credentials from shell are used
-# for Bedrock Converse requests for haiku.
+# to Anthropic API for opus/sonnet. Qwen requests are proxied to Instance 2
+# using openai/ prefix, which strips the OAuth header.
 
 model_list:
   # Tier 1: Main session (opus) - Anthropic API with OAuth
@@ -20,12 +20,14 @@ model_list:
       model: anthropic/claude-sonnet-4-5-20250929
       # No api_key needed - OAuth token forwarded from Authorization header
 
-  # Tier 3: Fast subagents (haiku) - Bedrock with AWS creds
+  # Tier 3: Fast subagents (haiku) - Proxy to Instance 2 (Bedrock-only)
+  # Using openai/ prefix routes through standard completion path, not passthrough,
+  # which prevents OAuth header forwarding to Instance 2
   - model_name: qwen-3-coder
     litellm_params:
-      model: bedrock/converse/qwen.qwen3-next-80b-a3b
-      aws_region_name: us-west-2
-      # Uses AWS credentials from shell environment
+      model: openai/qwen-3-coder
+      api_base: http://localhost:4001
+      api_key: "dummy"
 
 litellm_settings:
   drop_params: true
