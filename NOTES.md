@@ -1,3 +1,38 @@
+## Session: 2026-02-14 — Port collision fix, [1m] removal, Opus model ID fix
+
+### Diagnosed "Request too large (max 20MB)" error
+- The error occurred on ALL models when starting openClaude, even with a fresh session and single "test" prompt in a brand new directory
+- Root cause: **Port 4000 was occupied by a NestJS/Express campaign-manager app** (PID 2131086), not LiteLLM
+- openClaude's health check (`curl localhost:4000/health`) got 200 OK from Express and assumed LiteLLM was running
+- Claude Code was sending API requests to the Express app, which rejected them
+
+### Fixed: Killed the Express app on port 4000
+- `kill 2131086` freed the port for LiteLLM
+
+### Fixed: Removed all `[1m]` suffixes
+- Removed `[1m]` from `.model` in the openClaude script (line 102)
+- Simplified the comment about firstParty model names (lines 98-100)
+- Copied updated script to `~/.local/bin/openClaude`
+- Cleaned `[1m]` from `~/.openClaude/settings.json` (3 occurrences: model, ANTHROPIC_DEFAULT_OPUS_MODEL, ANTHROPIC_DEFAULT_SONNET_MODEL)
+
+### Fixed: Corrected Opus model ID in LiteLLM config
+- `anthropic/claude-opus-4-6-20250514` → `anthropic/claude-opus-4-6` (no date suffix for Opus 4.6)
+- Updated both `/home/jakekausler/.litellm/config.yaml` and `/storage/programs/openClaude/litellm-config.yaml`
+- Restarted LiteLLM with corrected config
+
+### Validated LiteLLM routing
+- Confirmed all 3 model names align between settings.json and LiteLLM config
+- Sonnet (`claude-sonnet-4-5`) confirmed working through LiteLLM → Anthropic API with OAuth token
+- Opus (`claude-opus-4-6`) was failing due to wrong model ID (now fixed)
+- Qwen (`qwen-3-coder`) routes to Bedrock but AWS SSO session needs refresh
+
+### Still TODO
+- Make openClaude health check more robust (verify it's LiteLLM, not just any HTTP server with `/health`)
+- Update CLAUDE.md documentation to remove `[1m]` references
+- Refresh AWS SSO session for Qwen/Bedrock route
+
+---
+
 # Session Notes: 2026-02-14
 
 ## Objective
