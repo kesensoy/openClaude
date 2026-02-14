@@ -95,18 +95,16 @@ for item in "$CLAUDE_DIR"/.*; do
 done
 
 # Generate derived settings.json from the user's existing ~/.claude/settings.json.
-# Uses firstParty model names so Claude Code recognizes [1m] for 1M context window.
-# Bedrock IDs like us.anthropic.claude-opus-4-6-v1[1m] don't match Claude Code's
-# [1m] parsing in non-Bedrock mode (it checks for "claude-opus-4-6[1m]" etc.)
+# Uses firstParty model names for Claude Code compatibility.
 jq '
-  .model = "claude-opus-4-6[1m]" |
+  .model = "claude-opus-4-6" |
   del(.awsCredentialExport) |
   del(.awsAuthRefresh) |
   .env = (.env |
     del(.CLAUDE_CODE_USE_BEDROCK) |
     del(.ANTHROPIC_API_KEY) |
-    .ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-4-6[1m]" |
-    .ANTHROPIC_DEFAULT_SONNET_MODEL = "claude-sonnet-4-5[1m]" |
+    .ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-4-6" |
+    .ANTHROPIC_DEFAULT_SONNET_MODEL = "claude-sonnet-4-5" |
     .ANTHROPIC_SMALL_FAST_MODEL = "qwen-3-coder" |
     .ANTHROPIC_DEFAULT_HAIKU_MODEL = "qwen-3-coder"
   )

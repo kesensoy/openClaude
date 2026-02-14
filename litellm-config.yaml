@@ -11,7 +11,7 @@ model_list:
   # Tier 1: Main session (opus) - Anthropic API with OAuth
   - model_name: claude-opus-4-6
     litellm_params:
-      model: anthropic/claude-opus-4-6-20250514
+      model: anthropic/claude-opus-4-6
       # No api_key needed - OAuth token forwarded from Authorization header
 
   # Tier 2: Subagents (sonnet) - Anthropic API with OAuth
@@ -29,4 +29,3 @@ model_list:
 
 litellm_settings:
   drop_params: true
-  forward_client_headers_to_llm_api: true  # Enable OAuth header forwarding
