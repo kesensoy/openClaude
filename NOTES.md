@@ -1,0 +1,231 @@
+# Session Notes: 2026-02-14
+
+## Objective
+
+Switch the `openclaude` AWS profile from SSO authentication to standard shell auth (IAM access keys) for Bedrock Qwen model access.
+
+## Problem Chain
+
+### 1. SSO Session Not Found
+
+**Issue**: The `openclaude` AWS profile referenced `sso_session = SystemAdministrator` which didn't exist in `~/.aws/config`.
+
+**Fix**: Removed all SSO-related configuration from `[profile openclaude]`:
+```ini
+[profile openclaude]
+region = us-west-2
+output = json
+```
+
+### 2. Missing Credentials
+
+**Issue**: After removing SSO config, the profile had no credentials.
+
+**Fix**: Configure static credentials using `aws configure --profile openclaude` or create a dedicated IAM user (see IAM Setup below).
+
+### 3. OAuth Header Leak to Bedrock (Critical Issue)
+
+**Issue**: LiteLLM's `/v1/messages` Anthropic passthrough endpoint forwards the Authorization header (containing Claude Code's OAuth token `sk-ant-oat01-*`) to ALL backends, including Bedrock. Bedrock rejected it with:
+```
+Invalid API Key format: Must start with pre-defined prefix
+```
+
+**Attempted Fixes (All Failed)**:
+- Removing `forward_client_headers_to_llm_api: true` — passthrough always forwards
+- Setting `api_key: ""` on Bedrock model definition — no effect
+- Adding explicit `aws_access_key_id`/`aws_secret_access_key` — header still leaked
+
+**Root Cause**: LiteLLM's `/v1/messages` passthrough is designed for Anthropic API compatibility and ALWAYS forwards the Authorization header. No per-model header filtering exists.
+
+**Solution**: Dual LiteLLM proxy architecture (see Architecture section below).
+
+### 4. Missing IAM Permissions
+
+**Issue**: IAM user had `bedrock:InvokeModel` but not `bedrock:InvokeModelWithResponseStream`.
+
+**Fix**: Add both permissions (Claude Code uses streaming).
+
+## Final Architecture
+
+### Dual LiteLLM Proxy Setup
+
+```
+Claude Code → Instance 1 (:4000)
+                ├─ claude-opus-4-6   → Anthropic API (OAuth passthrough ✓)
+                ├─ claude-sonnet-4-5 → Anthropic API (OAuth passthrough ✓)
+                └─ qwen-3-coder      → Instance 2 (:4001, via openai/ prefix)
+                                         └─ Bedrock Converse (AWS creds only ✓)
+```
+
+**Why Two Instances**:
+- Instance 1 handles all incoming requests from Claude Code
+- Opus/Sonnet route directly to Anthropic API (OAuth token is correct)
+- Qwen routes to Instance 2 using `openai/` prefix, which uses the standard completion path and strips the OAuth header
+- Instance 2 receives clean requests and routes to Bedrock with AWS credentials only
+
+**Key Insight**: The `openai/` prefix route through Instance 2 is the only way to prevent OAuth header leakage. The `/v1/messages` passthrough endpoint has no per-model header filtering.
+
+## Configuration Files
+
+### litellm-config.yaml (Instance 1, Port 4000)
+
+```yaml
+model_list:
+  # Anthropic direct (OAuth passthrough)
+  - model_name: claude-opus-4-6
+    litellm_params:
+      model: claude-opus-4-6
+      api_base: https://api.anthropic.com/v1
+      forward_client_headers_to_llm_api: true
+
+  - model_name: claude-sonnet-4-5
+    litellm_params:
+      model: claude-sonnet-4-5
+      api_base: https://api.anthropic.com/v1
+      forward_client_headers_to_llm_api: true
+
+  # Qwen via Instance 2 (strips OAuth header)
+  - model_name: qwen-3-coder
+    litellm_params:
+      model: openai/qwen-3-coder
+      api_base: http://localhost:4001
+
+general_settings:
+  master_key: sk-1234
+```
+
+### litellm-config-bedrock.yaml (Instance 2, Port 4001)
+
+```yaml
+model_list:
+  - model_name: qwen-3-coder
+    litellm_params:
+      model: bedrock/converse/qwen.qwen3-next-80b-a3b
+      aws_region_name: us-west-2
+      aws_profile_name: openclaude
+
+general_settings:
+  master_key: sk-5678
+```
+
+## IAM Setup Steps
+
+### Creating a Dedicated IAM User
+
+1. **Create IAM User**:
+   - AWS Console → IAM → Users → Create user
+   - Username: `claude-bedrock` (or similar)
+   - Access type: Programmatic access only (no console)
+
+2. **Create IAM Policy** (`BedrockQwenInvoke`):
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream"
+      ],
+      "Resource": "arn:aws:bedrock:us-west-2::foundation-model/qwen.qwen3-next-80b-a3b"
+    }
+  ]
+}
+```
+
+3. **Attach Policy to User**:
+   - Attach the `BedrockQwenInvoke` policy directly to the user
+
+4. **Create Access Keys**:
+   - Security credentials → Create access key
+   - Use case: "Application running outside AWS"
+   - Save the access key ID and secret access key
+
+5. **Configure AWS Profile**:
+```bash
+aws configure --profile openclaude
+# Enter:
+#   AWS Access Key ID: <from step 4>
+#   AWS Secret Access Key: <from step 4>
+#   Default region: us-west-2
+#   Default output format: json
+```
+
+6. **Enable Model Access** (if not already enabled):
+   - AWS Console → Bedrock → Model access (in us-west-2 region)
+   - Request access to Qwen 3 Next 80B if needed
+
+7. **Test Bedrock Access**:
+```bash
+aws bedrock-runtime converse \
+  --model-id qwen.qwen3-next-80b-a3b \
+  --region us-west-2 \
+  --profile openclaude \
+  --messages '[{"role":"user","content":[{"text":"Say hello"}]}]'
+```
+
+## AWS Configuration Files
+
+### ~/.aws/config
+
+```ini
+[profile openclaude]
+region = us-west-2
+output = json
+```
+
+**Important**: No SSO configuration should be present.
+
+### ~/.aws/credentials
+
+```ini
+[openclaude]
+aws_access_key_id = AKIA...
+aws_secret_access_key = ...
+```
+
+## Starting the Dual Proxy Setup
+
+The `openClaude` script now starts both LiteLLM instances:
+
+```bash
+# Instance 1 (main proxy)
+litellm --config ~/.litellm/config.yaml --port 4000 --detailed_debug &
+
+# Instance 2 (Bedrock-only proxy)
+litellm --config ~/.litellm/config-bedrock.yaml --port 4001 --detailed_debug &
+```
+
+Both instances are auto-started by the `openClaude` command and remain running until manually killed.
+
+## Stopping LiteLLM
+
+```bash
+pkill -f litellm
+```
+
+Or individually:
+```bash
+pkill -f "litellm.*4000"
+pkill -f "litellm.*4001"
+```
+
+## Key Learnings
+
+1. **LiteLLM Passthrough Behavior**: The `/v1/messages` endpoint is tightly coupled to Anthropic API and cannot selectively filter headers per backend.
+
+2. **Header Stripping via Proxy Chaining**: Using `openai/` prefix to route through a second LiteLLM instance is the cleanest way to strip unwanted headers.
+
+3. **IAM Permissions for Streaming**: Bedrock streaming requires both `InvokeModel` AND `InvokeModelWithResponseStream` permissions.
+
+4. **AWS Profile Isolation**: Static credentials in `~/.aws/credentials` completely replace SSO, no conflict between the two auth methods for the same profile.
+
+## Testing Checklist
+
+- [ ] Opus requests route to Anthropic API with OAuth token
+- [ ] Sonnet requests route to Anthropic API with OAuth token
+- [ ] Qwen requests route to Bedrock without OAuth header leak
+- [ ] All three models respond successfully in Claude Code
+- [ ] Streaming works for all models
+- [ ] LiteLLM processes auto-start with `openClaude` command
