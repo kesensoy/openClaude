@@ -1,3 +1,50 @@
+## Session: 2026-02-13 — Initial OAuth/Bedrock mixed routing setup
+
+### Context
+- User's work machine uses Bedrock API for everything via `claude` command
+- User wanted `openclaude` to use Claude plan (Max) OAuth for opus/sonnet and Bedrock for haiku
+- Personal machine (Linux) vs work machine (macOS)
+
+### Manual setup of openClaude (skipping install.sh)
+- Copied `openClaude` to `~/.local/bin/openClaude` and made executable
+- Copied `litellm-config.yaml` to `~/.litellm/config.yaml`
+- Installed LiteLLM: `uv tool install 'litellm[proxy]'`
+- Skipped AWS profile setup (user already authed as IAM user `foundryvtt`)
+
+### Fixed: macOS sed syntax on Linux
+- `sed -i ''` (macOS) fails on Linux — needs `sed -i` (no empty string arg)
+- Added OS detection using `$OSTYPE` to handle both platforms
+
+### Fixed: Removed AWS profile requirement for personal machine
+- Removed `AWS_PROFILE="$OPENCLAUDE_AWS_PROFILE"` from LiteLLM startup (line 43)
+- Removed `awsAuthRefresh` from jq command (no SSO login needed)
+- LiteLLM now inherits shell's AWS credentials directly
+
+### Brainstormed OAuth/Bedrock mixed routing design
+- Researched whether Claude Code supports per-model endpoint routing (it doesn't — single ANTHROPIC_BASE_URL)
+- Researched LiteLLM OAuth token forwarding (broken in official release)
+- Found PR #19912 (iamadamreed/litellm@fix/anthropic-oauth-token-forwarding) that fixes OAuth forwarding
+- Designed approach: all models through LiteLLM, opus/sonnet → Anthropic API (OAuth), haiku → Bedrock (AWS creds)
+
+### Implemented OAuth/Bedrock mixed routing
+- **Installed patched LiteLLM** from PR #19912 branch (version 1.81.4)
+- **Updated litellm-config.yaml**: opus/sonnet use `anthropic/` prefix (OAuth), haiku uses `bedrock/converse/` (AWS creds), added `forward_client_headers_to_llm_api: true`
+- **Updated openClaude script**: removed dummy `ANTHROPIC_API_KEY="sk-1234"` export, added `del(.ANTHROPIC_API_KEY)` to jq command so Claude Code uses native OAuth
+- **Updated README.md**: added OAuth Authentication section with PR #19912 caveat and migration instructions, updated Model Tiers table
+
+### Diagnosed "Request too large (max 20MB)" error (initial)
+- Error occurred with both production and patched LiteLLM
+- Investigated: NOT caused by projects directory being sent to API
+- Root cause: Claude Code's Messages API is stateless — sends full conversation history on every request
+- The current session had grown too large (976 messages, 1.9 MB JSONL)
+- Solution: start fresh session
+
+### Documents created
+- `docs/plans/2026-02-13-oauth-bedrock-mixed-routing-design.md` — design document
+- `docs/plans/2026-02-13-oauth-bedrock-mixed-routing.md` — implementation plan
+
+---
+
 ## Session: 2026-02-14 — Port collision fix, [1m] removal, Opus model ID fix
 
 ### Diagnosed "Request too large (max 20MB)" error
